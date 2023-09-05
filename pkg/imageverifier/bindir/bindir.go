@@ -122,6 +122,7 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 	}
 
 	cmd := exec.CommandContext(ctx, binPath, args...)
+	configureVerifierCommand(cmd)
 
 	// We construct our own pipes instead of using cmd.StdinPipe, cmd.StoutPipe,
 	// and cmd.StderrPipe in order to set timeouts on reads and writes.

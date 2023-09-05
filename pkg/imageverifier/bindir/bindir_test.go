@@ -1,5 +1,3 @@
-//go:build !windows
-
 /*
    Copyright The containerd Authors.
 
@@ -21,10 +19,14 @@ package bindir
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
-	"path"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"text/template"
 	"time"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -32,18 +34,44 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Currently, these tests don't run on Windows due to dependency on Bash.
+// buildGoVerifiers uses the local Go toolchain to build each of the standalone
+// main package source files in srcDir into binaries placed in binDir.
+func buildGoVerifiers(t *testing.T, srcsDir string, binDir string) {
+	srcs, err := os.ReadDir(srcsDir)
+	require.NoError(t, err)
 
-func newBinDir(t *testing.T, scripts ...string) string {
-	t.Helper()
+	for _, srcFile := range srcs {
+		// Build the source into a Go binary.
+		src := filepath.Join(srcsDir, srcFile.Name())
+		bin := filepath.Join(binDir, strings.Split(srcFile.Name(), ".")[0])
+		cmd := exec.Command("go", "build", "-o", bin, src)
+
+		code, err := os.ReadFile(src)
+		require.NoError(t, err)
+
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to build test verifier %s: %v\n%s\nGo code:\n%s", src, err, out, code)
+		}
+	}
+}
+
+// newBinDir creates a temporary directory and copies each of the selected bins
+// fromSrcDir into that directory. The copied verifier binaries are given names
+// such that they sort (and therefore execute) in the order that bins is given.
+func newBinDir(t *testing.T, srcDir string, bins ...string) string {
 	binDir := t.TempDir()
 
-	for i, s := range scripts {
-		err := os.WriteFile(
-			path.Join(binDir, fmt.Sprintf("%v.sh", i)),
-			[]byte(strings.TrimSpace(s)),
-			0700,
-		)
+	for i, bin := range bins {
+		src, err := os.Open(filepath.Join(srcDir, bin))
+		require.NoError(t, err)
+		defer src.Close()
+
+		dst, err := os.OpenFile(filepath.Join(binDir, fmt.Sprintf("verifier-%v", i)), os.O_WRONLY|os.O_CREATE, 0755)
+		require.NoError(t, err)
+		defer dst.Close()
+
+		_, err = io.Copy(dst, src)
 		require.NoError(t, err)
 	}
 
@@ -51,22 +79,44 @@ func newBinDir(t *testing.T, scripts ...string) string {
 }
 
 func TestBinDirVerifyImage(t *testing.T) {
-	t.Run("proper input/output management", func(t *testing.T) {
-		outDir := t.TempDir()
-		argsFile := path.Join(outDir, "args.txt")
-		stdinFile := path.Join(outDir, "stdin.txt")
+	// Build verifiers from plain Go file.
+	allBinsDir := t.TempDir()
+	buildGoVerifiers(t, "testdata/verifiers", allBinsDir)
 
-		binDir := newBinDir(t, fmt.Sprintf(`
-#!/usr/bin/env bash
-set -euf -o pipefail
-echo -n $@ > %v
-cat - > %v
-echo Reason A line 1
-echo Debug A line 1 1>&2
-echo Reason A line 2
-echo Debug A line 2 1>&2
-exit 0
-			`, argsFile, stdinFile),
+	// Build verifiers from templates.
+	data := struct {
+		ArgsFile  string
+		StdinFile string
+	}{
+		ArgsFile:  filepath.Join(t.TempDir(), "args.txt"),
+		StdinFile: filepath.Join(t.TempDir(), "stdin.txt"),
+	}
+
+	tmplDir := "testdata/verifier_templates"
+	templates, err := os.ReadDir(tmplDir)
+	require.NoError(t, err)
+
+	renderedVerifierTmplDir := t.TempDir()
+	for _, tmplFile := range templates {
+		tmplPath := filepath.Join(tmplDir, tmplFile.Name())
+
+		tmpl, err := template.New(tmplFile.Name()).ParseFiles(tmplPath)
+		require.NoError(t, err)
+
+		goFileName := strings.ReplaceAll(tmplFile.Name(), ".go.tmpl", ".go")
+		f, err := os.Create(filepath.Join(renderedVerifierTmplDir, goFileName))
+		require.NoError(t, err)
+		defer f.Close()
+
+		require.NoError(t, tmpl.Execute(f, data))
+		f.Close()
+	}
+	buildGoVerifiers(t, renderedVerifierTmplDir, allBinsDir)
+
+	// Actual tests begin here.
+	t.Run("proper input/output management", func(t *testing.T) {
+		binDir := newBinDir(t, allBinsDir,
+			"verifier_test_input_output_management",
 		)
 
 		v := NewImageVerifier(&Config{
@@ -83,24 +133,20 @@ exit 0
 		})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
-		assert.Equal(t, "0.sh => Reason A line 1\nReason A line 2", j.Reason)
+		assert.Equal(t, "verifier-0 => Reason A line 1\nReason A line 2", j.Reason)
 
-		b, err := os.ReadFile(argsFile)
+		b, err := os.ReadFile(data.ArgsFile)
 		require.NoError(t, err)
 		assert.Equal(t, "-name registry.example.com/image:abc -digest sha256:98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4 -stdin-media-type application/vnd.oci.descriptor.v1+json", string(b))
 
-		b, err = os.ReadFile(stdinFile)
+		b, err = os.ReadFile(data.StdinFile)
 		require.NoError(t, err)
 		assert.Equal(t, `{"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","digest":"sha256:98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4","size":2048,"annotations":{"a":"b"}}`, strings.TrimSpace(string(b)))
 	})
 
 	t.Run("stdout truncation", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-set -euf -o pipefail
-head -c 50000 /dev/random
-exit 0
-			`,
+		binDir := newBinDir(t, allBinsDir,
+			"large_stdout",
 		)
 
 		v := NewImageVerifier(&Config{
@@ -112,12 +158,12 @@ exit 0
 		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
-		assert.Less(t, len(j.Reason), outputLimitBytes+1024)
+		assert.Less(t, len(j.Reason), outputLimitBytes+1024) // 1024 leaves margin for the formatting around the reason.
 	})
 
 	t.Run("missing directory", func(t *testing.T) {
 		v := NewImageVerifier(&Config{
-			BinDir:             path.Join(t.TempDir(), "missing_directory"),
+			BinDir:             filepath.Join(t.TempDir(), "missing_directory"),
 			MaxVerifiers:       10,
 			PerVerifierTimeout: 1 * time.Second,
 		})
@@ -142,11 +188,8 @@ exit 0
 	})
 
 	t.Run("max verifiers = 0", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-# This isn't called.
-exit 1
-			`,
+		binDir := newBinDir(t, allBinsDir,
+			"reject_reason_d", // This never runs.
 		)
 
 		v := NewImageVerifier(&Config{
@@ -162,15 +205,9 @@ exit 1
 	})
 
 	t.Run("max verifiers = 1", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-# This isn't called.
-exit 1
-			`,
+		binDir := newBinDir(t, allBinsDir,
+			"accept_reason_a",
+			"reject_reason_d", // This never runs.
 		)
 
 		v := NewImageVerifier(&Config{
@@ -186,47 +223,10 @@ exit 1
 	})
 
 	t.Run("max verifiers = 2", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-# This isn't called.
-exit 1
-			`,
-		)
-
-		v := NewImageVerifier(&Config{
-			BinDir:             binDir,
-			MaxVerifiers:       2,
-			PerVerifierTimeout: 1 * time.Second,
-		})
-
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
-		assert.NoError(t, err)
-		assert.True(t, j.OK)
-		assert.NotEmpty(t, j.Reason)
-	})
-
-	t.Run("max verifiers = 2", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-# This isn't called.
-exit 1
-			`,
+		binDir := newBinDir(t, allBinsDir,
+			"accept_reason_a",
+			"accept_reason_a",
+			"reject_reason_d", // This never runs.
 		)
 
 		v := NewImageVerifier(&Config{
@@ -242,23 +242,11 @@ exit 1
 	})
 
 	t.Run("max verifiers = 3, all accept", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-echo Reason A
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-echo Reason B
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-echo Reason C
-exit 0
-			`,
+		binDir := newBinDir(t, allBinsDir,
+			"accept_reason_a",
+			"accept_reason_b",
+			"accept_reason_c",
 		)
-
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       3,
@@ -268,25 +256,14 @@ exit 0
 		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
-		assert.Equal(t, "0.sh => Reason A, 1.sh => Reason B, 2.sh => Reason C", j.Reason)
+		assert.Equal(t, "verifier-0 => Reason A, verifier-1 => Reason B, verifier-2 => Reason C", j.Reason)
 	})
 
 	t.Run("max verifiers = 3, with reject", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-echo Reason A
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-echo Reason B
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-echo Reason C
-exit 1
-			`,
+		binDir := newBinDir(t, allBinsDir,
+			"accept_reason_a",
+			"accept_reason_b",
+			"reject_reason_d",
 		)
 
 		v := NewImageVerifier(&Config{
@@ -298,25 +275,14 @@ exit 1
 		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.False(t, j.OK)
-		assert.Equal(t, "verifier 2.sh rejected image (exit code 1): Reason C", j.Reason)
+		assert.Equal(t, "verifier verifier-2 rejected image (exit code 1): Reason D", j.Reason)
 	})
 
 	t.Run("max verifiers = -1, all accept", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-echo Reason A
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-echo Reason B
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-echo Reason C
-exit 0
-			`,
+		binDir := newBinDir(t, allBinsDir,
+			"accept_reason_a",
+			"accept_reason_b",
+			"accept_reason_c",
 		)
 
 		v := NewImageVerifier(&Config{
@@ -328,25 +294,14 @@ exit 0
 		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
-		assert.Equal(t, "0.sh => Reason A, 1.sh => Reason B, 2.sh => Reason C", j.Reason)
+		assert.Equal(t, "verifier-0 => Reason A, verifier-1 => Reason B, verifier-2 => Reason C", j.Reason)
 	})
 
 	t.Run("max verifiers = -1, with reject", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-echo Reason A
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-echo Reason B
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-echo Reason C
-exit 1
-			`,
+		binDir := newBinDir(t, allBinsDir,
+			"accept_reason_a",
+			"accept_reason_b",
+			"reject_reason_d",
 		)
 
 		v := NewImageVerifier(&Config{
@@ -358,24 +313,14 @@ exit 1
 		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.False(t, j.OK)
-		assert.Equal(t, "verifier 2.sh rejected image (exit code 1): Reason C", j.Reason)
+		assert.Equal(t, "verifier verifier-2 rejected image (exit code 1): Reason D", j.Reason)
 	})
 
 	t.Run("max verifiers = -1, with timeout", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-# Greater than 250ms PerVerifierTimeout.
-sleep 1000
-exit 0
-			`,
+		binDir := newBinDir(t, allBinsDir,
+			"accept_reason_a",
+			"accept_reason_b",
+			"slow_child_process",
 		)
 
 		v := NewImageVerifier(&Config{
@@ -387,22 +332,25 @@ exit 0
 		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.Error(t, err)
 		assert.Nil(t, j)
+
+		command := []string{"ps", "ax"}
+		if runtime.GOOS == "windows" {
+			command = []string{"tasklist"}
+		}
+		b, err := exec.Command(command[0], command[1:]...).CombinedOutput()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if strings.Contains(string(b), "-sleep-forever") {
+			t.Fatalf("killing the verifier binary didn't kill all its children:\n%v", string(b))
+		}
 	})
 
 	t.Run("max verifiers = -1, with exec failure", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-exit 0
-			`,
-			`
-#!/usr/bin/env bash
-exit 0
-			`,
-			`
-#!/badshell
-exit 0
-			`,
-		)
+		binDir := t.TempDir()
+		err := os.WriteFile(filepath.Join(binDir, "bad.sh"), []byte("BAD"), 0744)
+		require.NoError(t, err)
 
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
@@ -416,10 +364,8 @@ exit 0
 	})
 
 	t.Run("descriptor larger than linux pipe buffer, verifier doesn't read stdin", func(t *testing.T) {
-		binDir := newBinDir(t, `
-#!/usr/bin/env bash
-exit 0
-			`,
+		binDir := newBinDir(t, allBinsDir,
+			"accept_reason_a",
 		)
 
 		v := NewImageVerifier(&Config{
