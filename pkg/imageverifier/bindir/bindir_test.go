@@ -414,4 +414,35 @@ exit 0
 		assert.Error(t, err)
 		assert.Nil(t, j)
 	})
+
+	t.Run("descriptor larger than linux pipe buffer, verifier doesn't read stdin", func(t *testing.T) {
+		binDir := newBinDir(t, `
+#!/usr/bin/env bash
+exit 0
+			`,
+		)
+
+		v := NewImageVerifier(&Config{
+			BinDir:             binDir,
+			MaxVerifiers:       1,
+			PerVerifierTimeout: 10 * time.Second,
+		})
+
+		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{
+			Digest:    "sha256:98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4",
+			MediaType: "application/vnd.docker.distribution.manifest.list.v2+json",
+			Size:      2048,
+			Annotations: map[string]string{
+				// Pipe buffer is usually 64KiB.
+				"large_payload": strings.Repeat("0", 2*64*(2<<9)),
+			},
+		})
+
+		// Should see a log like the following, but verification still succeeds:
+		// time="2023-09-05T11:15:50-04:00" level=warning msg="failed to completely write descriptor to stdin" error="write |1: broken pipe"
+
+		assert.NoError(t, err)
+		assert.True(t, j.OK)
+		assert.NotEmpty(t, j.Reason)
+	})
 }
