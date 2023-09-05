@@ -25,7 +25,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -114,7 +114,7 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 	ctx, cancel := context.WithTimeout(ctx, v.config.PerVerifierTimeout)
 	defer cancel()
 
-	binPath := path.Join(v.config.BinDir, bin)
+	binPath := filepath.Join(v.config.BinDir, bin)
 	args := []string{
 		"-name", imageName,
 		"-digest", desc.Digest.String(),
