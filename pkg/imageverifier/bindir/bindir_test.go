@@ -356,8 +356,7 @@ func TestBinDirVerifyImage(t *testing.T) {
 			assert.False(t, j.OK)
 			assert.Equal(t, "verifier verifier-2.exe rejected image (exit code 1): ", j.Reason)
 		} else {
-			// Example error: reading verifier stdout: read |0: i/o timeout
-			assert.Error(t, err)
+			assert.ErrorIs(t, err, os.ErrDeadlineExceeded)
 			assert.Nil(t, j)
 		}
 
