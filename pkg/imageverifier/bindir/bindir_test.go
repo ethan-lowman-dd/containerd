@@ -43,7 +43,7 @@ func buildGoVerifiers(t *testing.T, srcsDir string, binDir string) {
 	for _, srcFile := range srcs {
 		// Build the source into a Go binary.
 		src := filepath.Join(srcsDir, srcFile.Name())
-		bin := filepath.Join(binDir, strings.Split(srcFile.Name(), ".")[0])
+		bin := filepath.Join(binDir, strings.Split(srcFile.Name(), ".")[0]+exeIfWindows())
 		cmd := exec.Command("go", "build", "-o", bin, src)
 
 		code, err := os.ReadFile(src)
@@ -54,6 +54,14 @@ func buildGoVerifiers(t *testing.T, srcsDir string, binDir string) {
 			t.Fatalf("failed to build test verifier %s: %v\n%s\nGo code:\n%s", src, err, out, code)
 		}
 	}
+}
+
+func exeIfWindows() string {
+	// The command `go build -o abc abc.go` creates abc.exe on Windows.
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 // newBinDir creates a temporary directory and copies each of the selected bins
@@ -67,7 +75,7 @@ func newBinDir(t *testing.T, srcDir string, bins ...string) string {
 		require.NoError(t, err)
 		defer src.Close()
 
-		dst, err := os.OpenFile(filepath.Join(binDir, fmt.Sprintf("verifier-%v", i)), os.O_WRONLY|os.O_CREATE, 0755)
+		dst, err := os.OpenFile(filepath.Join(binDir, fmt.Sprintf("verifier-%v%v", i, exeIfWindows())), os.O_WRONLY|os.O_CREATE, 0755)
 		require.NoError(t, err)
 		defer dst.Close()
 
@@ -133,7 +141,7 @@ func TestBinDirVerifyImage(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
-		assert.Equal(t, "verifier-0 => Reason A line 1\nReason A line 2", j.Reason)
+		assert.Equal(t, fmt.Sprintf("verifier-0%[1]v => Reason A line 1\nReason A line 2", exeIfWindows()), j.Reason)
 
 		b, err := os.ReadFile(data.ArgsFile)
 		require.NoError(t, err)
@@ -256,7 +264,7 @@ func TestBinDirVerifyImage(t *testing.T) {
 		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
-		assert.Equal(t, "verifier-0 => Reason A, verifier-1 => Reason B, verifier-2 => Reason C", j.Reason)
+		assert.Equal(t, fmt.Sprintf("verifier-0%[1]v => Reason A, verifier-1%[1]v => Reason B, verifier-2%[1]v => Reason C", exeIfWindows()), j.Reason)
 	})
 
 	t.Run("max verifiers = 3, with reject", func(t *testing.T) {
@@ -275,7 +283,7 @@ func TestBinDirVerifyImage(t *testing.T) {
 		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.False(t, j.OK)
-		assert.Equal(t, "verifier verifier-2 rejected image (exit code 1): Reason D", j.Reason)
+		assert.Equal(t, fmt.Sprintf("verifier verifier-2%[1]v rejected image (exit code 1): Reason D", exeIfWindows()), j.Reason)
 	})
 
 	t.Run("max verifiers = -1, all accept", func(t *testing.T) {
@@ -294,7 +302,7 @@ func TestBinDirVerifyImage(t *testing.T) {
 		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
-		assert.Equal(t, "verifier-0 => Reason A, verifier-1 => Reason B, verifier-2 => Reason C", j.Reason)
+		assert.Equal(t, fmt.Sprintf("verifier-0%[1]v => Reason A, verifier-1%[1]v => Reason B, verifier-2%[1]v => Reason C", exeIfWindows()), j.Reason)
 	})
 
 	t.Run("max verifiers = -1, with reject", func(t *testing.T) {
@@ -313,7 +321,7 @@ func TestBinDirVerifyImage(t *testing.T) {
 		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.False(t, j.OK)
-		assert.Equal(t, "verifier verifier-2 rejected image (exit code 1): Reason D", j.Reason)
+		assert.Equal(t, fmt.Sprintf("verifier verifier-2%[1]v rejected image (exit code 1): Reason D", exeIfWindows()), j.Reason)
 	})
 
 	t.Run("max verifiers = -1, with timeout", func(t *testing.T) {
