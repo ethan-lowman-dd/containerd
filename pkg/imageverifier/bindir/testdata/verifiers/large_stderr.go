@@ -24,12 +24,12 @@ import (
 
 func main() {
 	n := 50000
-	fmt.Fprintf(os.Stderr, "attempting to write %v bytes to stdout\n", n)
+	fmt.Fprintf(os.Stderr, "attempting to write %v bytes to stderr\n", n)
 
-	wrote, err := fmt.Print(strings.Repeat("A", n))
+	wrote, err := fmt.Fprintf(os.Stderr, strings.Repeat("A", n))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "got error writing to stdout: %v\n", err)
+		fmt.Fprintf(os.Stderr, "got error writing to stderr: %v\n", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "wrote %v bytes to stdout\n", wrote)
+	fmt.Fprintf(os.Stderr, "wrote %v bytes to stderr\n", wrote)
 }

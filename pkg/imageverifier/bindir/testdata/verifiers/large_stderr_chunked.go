@@ -19,17 +19,27 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 )
 
 func main() {
-	n := 50000
-	fmt.Fprintf(os.Stderr, "attempting to write %v bytes to stdout\n", n)
+	n := 500000
+	fmt.Fprintf(os.Stderr, "attempting to write %v bytes to stderr\n", n)
 
-	wrote, err := fmt.Print(strings.Repeat("A", n))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "got error writing to stdout: %v\n", err)
+	// Writing this all in one fmt.Fprintf has a different interaction with
+	// stderr pipe buffering than writing one byte at a time.
+	wrote := 0
+	for i := 0; i < n; i++ {
+		w, err := fmt.Fprintf(os.Stderr, "A")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "got error writing to stderr: %v\n", err)
+		}
+
+		wrote += w
+
+		if i%10000 == 0 {
+			fmt.Fprintf(os.Stderr, "progress: wrote %v bytes to stderr\n", wrote)
+		}
 	}
 
-	fmt.Fprintf(os.Stderr, "wrote %v bytes to stdout\n", wrote)
+	fmt.Fprintf(os.Stderr, "wrote %v bytes to stderr\n", wrote)
 }

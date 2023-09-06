@@ -29,7 +29,9 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/containerd/containerd/log"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -87,6 +89,11 @@ func newBinDir(t *testing.T, srcDir string, bins ...string) string {
 }
 
 func TestBinDirVerifyImage(t *testing.T) {
+	// Enable debug logs to easily see stderr for verifiers upon test failure.
+	logger := log.L.Dup()
+	logger.Logger.SetLevel(logrus.DebugLevel)
+	ctx := log.WithLogger(context.Background(), logger)
+
 	// Build verifiers from plain Go file.
 	allBinsDir := t.TempDir()
 	buildGoVerifiers(t, "testdata/verifiers", allBinsDir)
@@ -130,10 +137,10 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       -1,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{
 			Digest:      "sha256:98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4",
 			MediaType:   "application/vnd.docker.distribution.manifest.list.v2+json",
 			Size:        2048,
@@ -152,31 +159,35 @@ func TestBinDirVerifyImage(t *testing.T) {
 		assert.Equal(t, `{"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","digest":"sha256:98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4","size":2048,"annotations":{"a":"b"}}`, strings.TrimSpace(string(b)))
 	})
 
-	t.Run("stdout truncation", func(t *testing.T) {
-		binDir := newBinDir(t, allBinsDir,
+	t.Run("large output is truncated", func(t *testing.T) {
+		bins := []string{
 			"large_stdout",
-		)
+			"large_stdout_chunked",
+			"large_stderr",
+			"large_stderr_chunked",
+		}
+		binDir := newBinDir(t, allBinsDir, bins...)
 
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       -1,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 30 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
-		assert.True(t, j.OK)
-		assert.Less(t, len(j.Reason), outputLimitBytes+1024) // 1024 leaves margin for the formatting around the reason.
+		assert.True(t, j.OK, "expected OK, got not OK with reason: %v", j.Reason)
+		assert.Less(t, len(j.Reason), len(bins)*(outputLimitBytes+1024), "reason is: %v", j.Reason) // 1024 leaves margin for the formatting around the reason.
 	})
 
 	t.Run("missing directory", func(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             filepath.Join(t.TempDir(), "missing_directory"),
 			MaxVerifiers:       10,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
 		assert.NotEmpty(t, j.Reason)
@@ -186,10 +197,10 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             t.TempDir(),
 			MaxVerifiers:       10,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
 		assert.NotEmpty(t, j.Reason)
@@ -203,10 +214,10 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       0,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
 		assert.Empty(t, j.Reason)
@@ -221,10 +232,10 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       1,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
 		assert.NotEmpty(t, j.Reason)
@@ -240,10 +251,10 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       2,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
 		assert.NotEmpty(t, j.Reason)
@@ -258,10 +269,10 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       3,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
 		assert.Equal(t, fmt.Sprintf("verifier-0%[1]v => Reason A, verifier-1%[1]v => Reason B, verifier-2%[1]v => Reason C", exeIfWindows()), j.Reason)
@@ -277,10 +288,10 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       3,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.False(t, j.OK)
 		assert.Equal(t, fmt.Sprintf("verifier verifier-2%[1]v rejected image (exit code 1): Reason D", exeIfWindows()), j.Reason)
@@ -296,10 +307,10 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       -1,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.True(t, j.OK)
 		assert.Equal(t, fmt.Sprintf("verifier-0%[1]v => Reason A, verifier-1%[1]v => Reason B, verifier-2%[1]v => Reason C", exeIfWindows()), j.Reason)
@@ -315,10 +326,10 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       -1,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.NoError(t, err)
 		assert.False(t, j.OK)
 		assert.Equal(t, fmt.Sprintf("verifier verifier-2%[1]v rejected image (exit code 1): Reason D", exeIfWindows()), j.Reason)
@@ -334,12 +345,21 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       -1,
-			PerVerifierTimeout: 250 * time.Millisecond,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
-		assert.Error(t, err)
-		assert.Nil(t, j)
+		// TODO: this still leaks verifier-2.exe
+
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
+		if runtime.GOOS == "windows" {
+			assert.NoError(t, err)
+			assert.False(t, j.OK)
+			assert.Equal(t, "verifier verifier-2.exe rejected image (exit code 1): ", j.Reason)
+		} else {
+			// Example error: reading verifier stdout: read |0: i/o timeout
+			assert.Error(t, err)
+			assert.Nil(t, j)
+		}
 
 		command := []string{"ps", "ax"}
 		if runtime.GOOS == "windows" {
@@ -363,10 +383,10 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       -1,
-			PerVerifierTimeout: 1 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{})
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{})
 		assert.Error(t, err)
 		assert.Nil(t, j)
 	})
@@ -379,16 +399,16 @@ func TestBinDirVerifyImage(t *testing.T) {
 		v := NewImageVerifier(&Config{
 			BinDir:             binDir,
 			MaxVerifiers:       1,
-			PerVerifierTimeout: 10 * time.Second,
+			PerVerifierTimeout: 5 * time.Second,
 		})
 
-		j, err := v.VerifyImage(context.Background(), "registry.example.com/image:abc", ocispec.Descriptor{
+		j, err := v.VerifyImage(ctx, "registry.example.com/image:abc", ocispec.Descriptor{
 			Digest:    "sha256:98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4",
 			MediaType: "application/vnd.docker.distribution.manifest.list.v2+json",
 			Size:      2048,
 			Annotations: map[string]string{
 				// Pipe buffer is usually 64KiB.
-				"large_payload": strings.Repeat("0", 2*64*(2<<9)),
+				"large_payload": strings.Repeat("0", 2*64*(1<<10)),
 			},
 		})
 

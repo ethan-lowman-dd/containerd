@@ -136,7 +136,7 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 
 	stdoutRead, stdoutWrite, err := os.Pipe()
 	if err != nil {
-		return -1, "", err
+		return -1, "", fmt.Errorf("creating stdout pipe: %w", err)
 	}
 	cmd.Stdout = stdoutWrite
 	defer stdoutRead.Close()
@@ -144,7 +144,7 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 
 	stderrRead, stderrWrite, err := os.Pipe()
 	if err != nil {
-		return -1, "", err
+		return -1, "", fmt.Errorf("creating stderr pipe: %w", err)
 	}
 	cmd.Stderr = stderrWrite
 	defer stderrRead.Close()
@@ -160,7 +160,7 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 
 	// Fork & exec the child process.
 	if err := cmd.Start(); err != nil {
-		return -1, "", err
+		return -1, "", fmt.Errorf("starting process: %w", err)
 	}
 
 	// Close the child ends of the pipes in the parent process.
@@ -194,27 +194,33 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 	stderrLogDone := make(chan struct{})
 	go func() {
 		defer close(stderrLogDone)
+		defer stderrRead.Close()
 		lr := &io.LimitedReader{
 			R: stderrRead,
 			N: outputLimitBytes,
 		}
+
 		s := bufio.NewScanner(lr)
 		for s.Scan() {
-			// Log a line of stderr, appending a message if it is truncated.
-			line := strings.Builder{}
-			line.WriteString(s.Text())
-			if lr.N == 0 {
-				// LimitedReader finished reading stderr.
-				// Peek ahead to see if stderr reader was truncated.
-				b := make([]byte, 1)
-				if n, _ := stderrRead.Read(b); n > 0 {
-					line.WriteString("(stderr truncated)")
-				}
-			}
-			stderrLog.Debug(line.String())
+			stderrLog.Debug(s.Text())
 		}
 		if err := s.Err(); err != nil {
 			stderrLog.WithError(err).Debug("error logging image verifier stderr")
+		}
+
+		if lr.N == 0 {
+			// Peek ahead to see if stderr reader was truncated.
+			b := make([]byte, 1)
+			if n, _ := stderrRead.Read(b); n > 0 {
+				stderrLog.Debug("(previous logs may be truncated)")
+			}
+		}
+
+		// Discard the truncated part of stderr. Doing this rather than closing the
+		// reader avoids broken pipe errors. This is bounded by the stderrRead
+		// deadline.
+		if _, err := io.Copy(io.Discard, stderrRead); err != nil {
+			log.G(ctx).WithError(err).Error("error flushing stderr")
 		}
 	}()
 
@@ -232,12 +238,20 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 	}
 	reason = m.String()
 
+	// Discard the truncated part of stdout. Doing this rather than closing the
+	// reader avoids broken pipe errors. This is bounded by the stdoutRead
+	// deadline.
+	if _, err := io.Copy(io.Discard, stdoutRead); err != nil {
+		log.G(ctx).WithError(err).Error("error flushing stdout")
+	}
+	stdoutRead.Close()
+
 	<-stderrLogDone
 	if err := cmd.Wait(); err != nil {
 		if ee := (&exec.ExitError{}); errors.As(err, &ee) && ee.ProcessState.Exited() {
 			return ee.ProcessState.ExitCode(), reason, nil
 		}
-		return -1, "", err
+		return -1, "", fmt.Errorf("waiting on command to exit: %v", err)
 	}
 
 	return cmd.ProcessState.ExitCode(), reason, nil

@@ -20,7 +20,7 @@ package bindir
 
 import (
 	"os/exec"
-	"syscall"
+	"golang.org/x/sys/unix"
 )
 
 func configureVerifierCommand(cmd *exec.Cmd) {
@@ -29,11 +29,11 @@ func configureVerifierCommand(cmd *exec.Cmd) {
 
 	// Assign the verifier a new process group so that killing its process group
 	// in Cancel() doesn't kill the parent process (containerd).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &unix.SysProcAttr{Setpgid: true}
 
 	cmd.Cancel = func() error {
 		// Passing a negative PID causes kill(2) to kill all processes in the
 		// process group whose ID is cmd.Process.Pid.
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
 	}
 }
