@@ -19,8 +19,8 @@
 package bindir
 
 import (
-	"os/exec"
 	"golang.org/x/sys/unix"
+	"os/exec"
 )
 
 func configureVerifierCommand(cmd *exec.Cmd) {
