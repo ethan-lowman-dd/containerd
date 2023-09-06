@@ -71,7 +71,7 @@ func newBinDir(t *testing.T, srcDir string, bins ...string) string {
 	binDir := t.TempDir()
 
 	for i, bin := range bins {
-		src, err := os.Open(filepath.Join(srcDir, bin))
+		src, err := os.Open(filepath.Join(srcDir, bin+exeIfWindows()))
 		require.NoError(t, err)
 		defer src.Close()
 
