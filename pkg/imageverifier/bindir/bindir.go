@@ -122,10 +122,9 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 	}
 
 	cmd := exec.CommandContext(ctx, binPath, args...)
-	configureVerifierCommand(cmd)
 
-	// We construct our own pipes instead of using cmd.StdinPipe, cmd.StoutPipe,
-	// and cmd.StderrPipe in order to set timeouts on reads and writes.
+	// We construct our own pipes instead of using the default StdinPipe,
+	// StoutPipe, and StderrPipe in order to set timeouts on reads and writes.
 	stdinRead, stdinWrite, err := os.Pipe()
 	if err != nil {
 		return -1, "", err
@@ -136,7 +135,7 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 
 	stdoutRead, stdoutWrite, err := os.Pipe()
 	if err != nil {
-		return -1, "", fmt.Errorf("creating stdout pipe: %w", err)
+		return -1, "", err
 	}
 	cmd.Stdout = stdoutWrite
 	defer stdoutRead.Close()
@@ -144,7 +143,7 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 
 	stderrRead, stderrWrite, err := os.Pipe()
 	if err != nil {
-		return -1, "", fmt.Errorf("creating stderr pipe: %w", err)
+		return -1, "", err
 	}
 	cmd.Stderr = stderrWrite
 	defer stderrRead.Close()
@@ -158,10 +157,12 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 		stderrRead.SetDeadline(d)
 	}
 
-	// Fork & exec the child process.
-	if err := cmd.Start(); err != nil {
-		return -1, "", fmt.Errorf("starting process: %w", err)
+	// Finish configuring, and then fork & exec the child process.
+	p, err := startProcess(ctx, cmd)
+	if err != nil {
+		return -1, "", err
 	}
+	defer p.cleanup(ctx)
 
 	// Close the child ends of the pipes in the parent process.
 	stdinRead.Close()

@@ -19,15 +19,20 @@
 package bindir
 
 import (
+	"context"
+	"fmt"
 	"os/exec"
 
 	"golang.org/x/sys/unix"
 )
 
-func configureVerifierCommand(cmd *exec.Cmd) {
-	// Configure the verifier command so that killing it kills all child
-	// processes of the verifier process.
+type process struct {
+	cmd *exec.Cmd
+}
 
+// Configure the verifier command so that killing it kills all child
+// processes of the verifier process.
+func startProcess(ctx context.Context, cmd *exec.Cmd) (*process, error) {
 	// Assign the verifier a new process group so that killing its process group
 	// in Cancel() doesn't kill the parent process (containerd).
 	cmd.SysProcAttr = &unix.SysProcAttr{Setpgid: true}
@@ -37,4 +42,14 @@ func configureVerifierCommand(cmd *exec.Cmd) {
 		// process group whose ID is cmd.Process.Pid.
 		return unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
 	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("starting process: %w", err)
+	}
+
+	return &process{
+		cmd: cmd,
+	}, nil
 }
+
+func (p *process) cleanup(ctx context.Context) {}

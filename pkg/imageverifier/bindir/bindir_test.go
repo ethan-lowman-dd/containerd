@@ -369,7 +369,7 @@ func TestBinDirVerifyImage(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if strings.Contains(string(b), "-sleep-forever") {
+		if strings.Contains(string(b), "verifier-") {
 			t.Fatalf("killing the verifier binary didn't kill all its children:\n%v", string(b))
 		}
 	})
